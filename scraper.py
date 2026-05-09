@@ -1,10 +1,11 @@
+import hashlib
 import json
 import re
 from collections import Counter
-from html import unescape
-from html.parser import HTMLParser
 from pathlib import Path
 from urllib.parse import parse_qs, urldefrag, urljoin, urlparse
+
+from bs4 import BeautifulSoup
 
 
 STATS_FILE = Path("crawler_stats.json")
@@ -19,6 +20,13 @@ ALLOWED_DOMAINS = (
     ".informatics.uci.edu",
     ".stat.uci.edu",
 )
+
+# Crawl behavior thresholds (honor traps, dead pages, duplicates, oversized payloads).
+MAX_HTML_RESPONSE_BYTES = 5 * 1024 * 1024
+MIN_WORDS_TO_FOLLOW_LINKS = 15
+DUPLICATE_TRAP_MIN_WORD_LENGTH = 200
+DUPLICATE_TRAP_MAX_UNIQUE_URLS_FOR_FINGERPRINT = 35
+VISUAL_DEAF_PAGE_HTML_MAX = 1500
 
 STOP_WORDS = {
     "a", "about", "above", "after", "again", "against", "all", "am", "an",
@@ -39,19 +47,6 @@ STOP_WORDS = {
 }
 
 
-class LinkParser(HTMLParser):
-    def __init__(self):
-        super().__init__()
-        self.links = []
-
-    def handle_starttag(self, tag, attrs):
-        if tag.lower() != "a":
-            return
-        for key, value in attrs:
-            if key.lower() == "href" and value:
-                self.links.append(value.strip())
-
-
 def scraper(url, resp):
     links = extract_next_links(url, resp)
     return [link for link in links if is_valid(link)]
@@ -64,6 +59,7 @@ def _load_stats():
             "longest_page": {"url": "", "word_count": 0},
             "word_freq": {},
             "subdomains": {},
+            "fingerprint_counts": {},
         }
     try:
         with STATS_FILE.open("r", encoding="utf-8") as f:
@@ -72,6 +68,7 @@ def _load_stats():
         data.setdefault("longest_page", {"url": "", "word_count": 0})
         data.setdefault("word_freq", {})
         data.setdefault("subdomains", {})
+        data.setdefault("fingerprint_counts", {})
         return data
     except (json.JSONDecodeError, OSError):
         return {
@@ -79,6 +76,7 @@ def _load_stats():
             "longest_page": {"url": "", "word_count": 0},
             "word_freq": {},
             "subdomains": {},
+            "fingerprint_counts": {},
         }
 
 
@@ -99,15 +97,55 @@ def _canon_url(candidate):
     return f"{scheme}://{host}{path}{query}"
 
 
-def _extract_words(html_content):
-    text = re.sub(r"(?is)<(script|style).*?>.*?</\1>", " ", html_content)
-    text = re.sub(r"(?s)<[^>]+>", " ", text)
-    text = unescape(text).lower()
+def _extract_words(soup):
+    for tag in soup(["script", "style", "noscript"]):
+        tag.decompose()
+    text = soup.get_text(separator=" ", strip=True).lower()
     words = re.findall(r"[a-z0-9]+", text)
     return [w for w in words if w not in STOP_WORDS]
 
 
-def _record_page_stats(page_url, html_content):
+def _token_fingerprint(words):
+    if not words:
+        return ""
+    normalized = "|".join(words[:3000])
+    return hashlib.sha256(normalized.encode("utf-8", errors="ignore")).hexdigest()
+
+
+def _is_dead_like_page(words, html_len):
+    """HTTP 200 but no usable textual body — drop links only; page still counted as visited."""
+    if html_len <= 32:
+        return True
+    if not words:
+        return True
+    total_alnum_chars = sum(len(w) for w in words)
+    if total_alnum_chars < 120 and html_len <= VISUAL_DEAF_PAGE_HTML_MAX:
+        return True
+    return False
+
+
+def _duplicate_body_exhausted(words):
+    """
+    Repeated near-identical text across many URLs (calendar shells, redirects, traps).
+    Return True → do not enqueue any Outlinks.
+    """
+    joined = " ".join(words)
+    if len(joined) < DUPLICATE_TRAP_MIN_WORD_LENGTH:
+        return False
+    fp = _token_fingerprint(words)
+    if not fp:
+        return False
+    stats = _load_stats()
+    counts = stats.setdefault("fingerprint_counts", {})
+    prev = counts.get(fp, 0)
+    halt = prev >= DUPLICATE_TRAP_MAX_UNIQUE_URLS_FOR_FINGERPRINT
+    counts[fp] = prev + 1
+    stats["fingerprint_counts"] = counts
+    _save_stats(stats)
+    return halt
+
+
+def _record_page_stats(page_url, words):
     stats = _load_stats()
     unique_pages = set(stats["unique_pages"])
     if page_url in unique_pages:
@@ -116,7 +154,6 @@ def _record_page_stats(page_url, html_content):
     unique_pages.add(page_url)
     stats["unique_pages"] = sorted(unique_pages)
 
-    words = _extract_words(html_content)
     word_count = len(words)
     if word_count > stats["longest_page"].get("word_count", 0):
         stats["longest_page"] = {"url": page_url, "word_count": word_count}
@@ -150,26 +187,49 @@ def extract_next_links(url, resp):
         return []
 
     raw = resp.raw_response.content or b""
-    if len(raw) > 10_000_000:
+    raw_len = len(raw)
+    if raw_len > MAX_HTML_RESPONSE_BYTES:
         return []
+    declared = (
+        resp.raw_response.headers.get("Content-Length") or "").strip()
+    try:
+        if declared.isdigit() and int(declared) > MAX_HTML_RESPONSE_BYTES:
+            return []
+    except (TypeError, ValueError):
+        pass
 
     html = raw.decode("utf-8", errors="ignore")
     if not html.strip():
         return []
 
     page_url = _canon_url(resp.raw_response.url or url)
-    if page_url and is_valid(page_url):
-        _record_page_stats(page_url, html)
 
-    parser = LinkParser()
     try:
-        parser.feed(html)
+        soup = BeautifulSoup(html, "html.parser")
     except Exception:
+        return []
+
+    words = _extract_words(soup)
+    html_len = len(html)
+
+    if page_url and is_valid(page_url):
+        _record_page_stats(page_url, words)
+
+    if _is_dead_like_page(words, html_len):
+        return []
+
+    if len(words) < MIN_WORDS_TO_FOLLOW_LINKS:
+        return []
+
+    if _duplicate_body_exhausted(words):
         return []
 
     next_links = []
     base = page_url or url
-    for href in parser.links:
+    for anchor in soup.find_all("a", href=True):
+        href = anchor.get("href")
+        if not href:
+            continue
         absolute = urljoin(base, href)
         clean = _canon_url(absolute)
         if clean:
@@ -206,8 +266,8 @@ def is_valid(url):
             return False
 
         trap_tokens = (
-            "calendar", "event", "share=", "replytocom=", "sort=", "sessionid=",
-            "filter=", "page=", "login", "signup", "wp-content", "wp-json"
+            "share=", "replytocom=", "sort=", "sessionid=",
+            "filter=", "login", "signup", "wp-json"
         )
         lowered = url.lower()
         if any(token in lowered for token in trap_tokens):
