@@ -1,9 +1,8 @@
-import hashlib
 import json
 import re
 from collections import Counter
 from pathlib import Path
-from urllib.parse import parse_qs, urldefrag, urljoin, urlparse
+from urllib.parse import parse_qs, unquote_plus, urldefrag, urljoin, urlparse
 
 from bs4 import BeautifulSoup
 
@@ -21,12 +20,20 @@ ALLOWED_DOMAINS = (
     ".stat.uci.edu",
 )
 
-# Crawl behavior thresholds (honor traps, dead pages, duplicates, oversized payloads).
+HOSTS_BLOCKED = frozenset(
+    (
+        "wics.ics.uci.edu",
+        "ngs.ics.uci.edu",
+    )
+)
+
 MAX_HTML_RESPONSE_BYTES = 5 * 1024 * 1024
 MIN_WORDS_TO_FOLLOW_LINKS = 15
-DUPLICATE_TRAP_MIN_WORD_LENGTH = 200
-DUPLICATE_TRAP_MAX_UNIQUE_URLS_FOR_FINGERPRINT = 35
 VISUAL_DEAF_PAGE_HTML_MAX = 1500
+
+# Query token ical=… (encoded = ok). Avoids matching "medical" in paths.
+_ICAL_PARAM = re.compile(r"[?&]ical(?:=|%3d|%3D)", re.IGNORECASE)
+_TRIBE_HINT = re.compile(r"tribe[-_%]", re.IGNORECASE)
 
 STOP_WORDS = {
     "a", "about", "above", "after", "again", "against", "all", "am", "an",
@@ -59,7 +66,6 @@ def _load_stats():
             "longest_page": {"url": "", "word_count": 0},
             "word_freq": {},
             "subdomains": {},
-            "fingerprint_counts": {},
         }
     try:
         with STATS_FILE.open("r", encoding="utf-8") as f:
@@ -68,7 +74,6 @@ def _load_stats():
         data.setdefault("longest_page", {"url": "", "word_count": 0})
         data.setdefault("word_freq", {})
         data.setdefault("subdomains", {})
-        data.setdefault("fingerprint_counts", {})
         return data
     except (json.JSONDecodeError, OSError):
         return {
@@ -76,7 +81,6 @@ def _load_stats():
             "longest_page": {"url": "", "word_count": 0},
             "word_freq": {},
             "subdomains": {},
-            "fingerprint_counts": {},
         }
 
 
@@ -105,13 +109,6 @@ def _extract_words(soup):
     return [w for w in words if w not in STOP_WORDS]
 
 
-def _token_fingerprint(words):
-    if not words:
-        return ""
-    normalized = "|".join(words[:3000])
-    return hashlib.sha256(normalized.encode("utf-8", errors="ignore")).hexdigest()
-
-
 def _is_dead_like_page(words, html_len):
     """HTTP 200 but no usable textual body — drop links only; page still counted as visited."""
     if html_len <= 32:
@@ -122,27 +119,6 @@ def _is_dead_like_page(words, html_len):
     if total_alnum_chars < 120 and html_len <= VISUAL_DEAF_PAGE_HTML_MAX:
         return True
     return False
-
-
-def _duplicate_body_exhausted(words):
-    """
-    Repeated near-identical text across many URLs (calendar shells, redirects, traps).
-    Return True → do not enqueue any Outlinks.
-    """
-    joined = " ".join(words)
-    if len(joined) < DUPLICATE_TRAP_MIN_WORD_LENGTH:
-        return False
-    fp = _token_fingerprint(words)
-    if not fp:
-        return False
-    stats = _load_stats()
-    counts = stats.setdefault("fingerprint_counts", {})
-    prev = counts.get(fp, 0)
-    halt = prev >= DUPLICATE_TRAP_MAX_UNIQUE_URLS_FOR_FINGERPRINT
-    counts[fp] = prev + 1
-    stats["fingerprint_counts"] = counts
-    _save_stats(stats)
-    return halt
 
 
 def _record_page_stats(page_url, words):
@@ -221,9 +197,6 @@ def extract_next_links(url, resp):
     if len(words) < MIN_WORDS_TO_FOLLOW_LINKS:
         return []
 
-    if _duplicate_body_exhausted(words):
-        return []
-
     next_links = []
     base = page_url or url
     for anchor in soup.find_all("a", href=True):
@@ -250,10 +223,30 @@ def is_valid(url):
         if not any(host == dom[1:] or host.endswith(dom) for dom in ALLOWED_DOMAINS):
             return False
 
+        if host in HOSTS_BLOCKED:
+            return False
+
+        lowered = url.lower()
+        path_l = parsed.path.lower()
+
+        path_segments = [seg for seg in path_l.split("/") if seg]
+
+        # Glob */events/* — any URL whose path contains a segment named exactly "events".
+        if "events" in path_segments:
+            return False
+
+        # Singular /event/<slug>/… calendar churn.
+        if path_l.startswith("/event/"):
+            return False
+
+        if _ICAL_PARAM.search(lowered):
+            return False
+        if _TRIBE_HINT.search(lowered):
+            return False
+
         if len(url) > MAX_URL_LENGTH:
             return False
 
-        path_segments = [seg for seg in parsed.path.lower().split("/") if seg]
         if len(path_segments) > MAX_PATH_DEPTH:
             return False
         if path_segments:
@@ -265,12 +258,18 @@ def is_valid(url):
         if len(query) > MAX_QUERY_PARAMS:
             return False
 
+        for key in query:
+            kd = unquote_plus(key.replace("+", "%20")).lower()
+            if "filter" in kd:
+                return False
+
         trap_tokens = (
             "share=", "replytocom=", "sort=", "sessionid=",
-            "filter=", "login", "signup", "wp-json"
+            "filter=", "login", "signup", "wp-json",
         )
-        lowered = url.lower()
-        if any(token in lowered for token in trap_tokens):
+        if any(tok in lowered for tok in trap_tokens):
+            return False
+        if "filter%5b" in lowered:
             return False
 
         return not re.match(
