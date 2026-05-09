@@ -28,6 +28,7 @@ HOSTS_BLOCKED = frozenset(
 )
 
 MAX_HTML_RESPONSE_BYTES = 5 * 1024 * 1024
+# Pages below this (non-stopword tokens after stripping HTML) do not expand the frontier.
 MIN_WORDS_TO_FOLLOW_LINKS = 15
 VISUAL_DEAF_PAGE_HTML_MAX = 1500
 
@@ -121,7 +122,7 @@ def _is_dead_like_page(words, html_len):
     return False
 
 
-def _record_page_stats(page_url, words):
+def _record_page_stats(page_url, words, word_count_all):
     stats = _load_stats()
     unique_pages = set(stats["unique_pages"])
     if page_url in unique_pages:
@@ -130,9 +131,9 @@ def _record_page_stats(page_url, words):
     unique_pages.add(page_url)
     stats["unique_pages"] = sorted(unique_pages)
 
-    word_count = len(words)
-    if word_count > stats["longest_page"].get("word_count", 0):
-        stats["longest_page"] = {"url": page_url, "word_count": word_count}
+    # Longest page: assignment asks for all words (HTML stripped); top-50 uses `words` (no stopwords).
+    if word_count_all > stats["longest_page"].get("word_count", 0):
+        stats["longest_page"] = {"url": page_url, "word_count": word_count_all}
 
     freq = Counter(stats.get("word_freq", {}))
     freq.update(words)
@@ -186,10 +187,12 @@ def extract_next_links(url, resp):
         return []
 
     words = _extract_words(soup)
+    text_visible = soup.get_text(separator=" ", strip=True).lower()
+    word_count_all = len(re.findall(r"[a-z0-9]+", text_visible))
     html_len = len(html)
 
     if page_url and is_valid(page_url):
-        _record_page_stats(page_url, words)
+        _record_page_stats(page_url, words, word_count_all)
 
     if _is_dead_like_page(words, html_len):
         return []
@@ -258,9 +261,20 @@ def is_valid(url):
         if len(query) > MAX_QUERY_PARAMS:
             return False
 
-        for key in query:
-            kd = unquote_plus(key.replace("+", "%20")).lower()
+        for raw_key, values in query.items():
+            kd = unquote_plus(raw_key.replace("+", "%20")).lower()
             if "filter" in kd:
+                return False
+            # Low-text media UIs (DokuWiki media manager, WP attachments): reject before fetch.
+            if kd == "do" and any(
+                (v or "").lower() == "media" for v in values
+            ):
+                return False
+            if kd == "attachment_id" and any(v for v in values):
+                return False
+            if host == "wiki.ics.uci.edu" and kd == "image" and any(
+                v for v in values
+            ):
                 return False
 
         trap_tokens = (
