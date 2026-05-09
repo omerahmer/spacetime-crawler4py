@@ -265,10 +265,12 @@ def is_valid(url):
             kd = unquote_plus(raw_key.replace("+", "%20")).lower()
             if "filter" in kd:
                 return False
-            # Low-text media UIs (DokuWiki media manager, WP attachments): reject before fetch.
+            # Low-text media UIs; DokuWiki revision diffs (do=diff, difftype=…).
             if kd == "do" and any(
-                (v or "").lower() == "media" for v in values
+                (v or "").lower() in ("media", "diff") for v in values
             ):
+                return False
+            if kd == "difftype":
                 return False
             if kd == "attachment_id" and any(v for v in values):
                 return False
