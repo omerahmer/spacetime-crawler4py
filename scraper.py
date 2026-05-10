@@ -1,3 +1,4 @@
+import hashlib
 import json
 import re
 from collections import Counter
@@ -31,6 +32,15 @@ MAX_HTML_RESPONSE_BYTES = 5 * 1024 * 1024
 # Pages below this (non-stopword tokens after stripping HTML) do not expand the frontier.
 MIN_WORDS_TO_FOLLOW_LINKS = 15
 VISUAL_DEAF_PAGE_HTML_MAX = 1500
+
+# Fingerprints: same boilerplate text across many URLs → stop adding outlinks for new URLs.
+DUPLICATE_BODY_MIN_CHARS = 180
+MAX_PAGES_PER_CONTENT_FINGERPRINT = 28
+_FINGERPRINT_TOKEN_CAP = 4000
+
+# Navigation / directory shells: too many links vs visible words → do not expand frontier.
+MAX_LINK_TO_WORD_RATIO = 2.5
+MAX_LINKS_WHEN_NO_WORDS = 35
 
 # Query token ical=… (encoded = ok). Avoids matching "medical" in paths.
 _ICAL_PARAM = re.compile(r"[?&]ical(?:=|%3d|%3D)", re.IGNORECASE)
@@ -67,6 +77,7 @@ def _load_stats():
             "longest_page": {"url": "", "word_count": 0},
             "word_freq": {},
             "subdomains": {},
+            "fingerprint_counts": {},
         }
     try:
         with STATS_FILE.open("r", encoding="utf-8") as f:
@@ -75,6 +86,7 @@ def _load_stats():
         data.setdefault("longest_page", {"url": "", "word_count": 0})
         data.setdefault("word_freq", {})
         data.setdefault("subdomains", {})
+        data.setdefault("fingerprint_counts", {})
         return data
     except (json.JSONDecodeError, OSError):
         return {
@@ -82,6 +94,7 @@ def _load_stats():
             "longest_page": {"url": "", "word_count": 0},
             "word_freq": {},
             "subdomains": {},
+            "fingerprint_counts": {},
         }
 
 
@@ -119,6 +132,46 @@ def _is_dead_like_page(words, html_len):
     total_alnum_chars = sum(len(w) for w in words)
     if total_alnum_chars < 120 and html_len <= VISUAL_DEAF_PAGE_HTML_MAX:
         return True
+    return False
+
+
+def _content_fingerprint(words):
+    """Hash of stopword-stripped tokens — identical boilerplate pages share the fingerprint."""
+    if not words:
+        return ""
+    joined = "|".join(words[:_FINGERPRINT_TOKEN_CAP])
+    return hashlib.sha256(joined.encode("utf-8", errors="ignore")).hexdigest()
+
+
+def _link_dense_trap(link_count, word_count_all):
+    """
+    High link count relative to article text — link farms, giant nav blocks, trap listings.
+    Uses full visible word count (same tokenization as longest-page metric).
+    """
+    if word_count_all < 1:
+        return link_count > MAX_LINKS_WHEN_NO_WORDS
+    return (link_count / word_count_all) > MAX_LINK_TO_WORD_RATIO
+
+
+def _duplicate_low_info_exhausted(words):
+    """
+    After MAX_PAGES_PER_CONTENT_FINGERPRINT crawled pages share the same body fingerprint,
+    do not enqueue further links (similar shells / no new information).
+    """
+    body = " ".join(words)
+    if len(body.strip()) < DUPLICATE_BODY_MIN_CHARS:
+        return False
+    fp = _content_fingerprint(words)
+    if not fp:
+        return False
+    stats = _load_stats()
+    counts = stats.setdefault("fingerprint_counts", {})
+    prev = counts.get(fp, 0)
+    if prev >= MAX_PAGES_PER_CONTENT_FINGERPRINT:
+        return True
+    counts[fp] = prev + 1
+    stats["fingerprint_counts"] = counts
+    _save_stats(stats)
     return False
 
 
@@ -200,6 +253,13 @@ def extract_next_links(url, resp):
     if len(words) < MIN_WORDS_TO_FOLLOW_LINKS:
         return []
 
+    if _duplicate_low_info_exhausted(words):
+        return []
+
+    link_count = len(soup.find_all("a", href=True))
+    if _link_dense_trap(link_count, word_count_all):
+        return []
+
     next_links = []
     base = page_url or url
     for anchor in soup.find_all("a", href=True):
@@ -277,6 +337,9 @@ def is_valid(url):
             if host == "wiki.ics.uci.edu" and kd == "image" and any(
                 v for v in values
             ):
+                return False
+            # DokuWiki sidebar/index browser (?idx=namespace:...) — same page, URL explosion.
+            if host == "wiki.ics.uci.edu" and kd == "idx":
                 return False
 
         trap_tokens = (
