@@ -46,6 +46,31 @@ MAX_LINKS_WHEN_NO_WORDS = 35
 _ICAL_PARAM = re.compile(r"[?&]ical(?:=|%3d|%3D)", re.IGNORECASE)
 _TRIBE_HINT = re.compile(r"tribe[-_%]", re.IGNORECASE)
 
+# wiki.ics.uci.edu — DokuWiki non-article views (edit, old revisions, exports, indexes).
+_WIKI_BAD_DO = frozenset(
+    (
+        "",
+        "edit",
+        "export_pdf",
+        "export_odt",
+        "export_xhtml",
+        "export_raw",
+        "index",
+        "recent",
+        "backlink",
+        "revisions",
+        "media",
+        "diff",
+        "subscribe",
+        "admin",
+        "profile",
+        "register",
+        "recyclebin",
+        "login",
+        "logout",
+    )
+)
+
 STOP_WORDS = {
     "a", "about", "above", "after", "again", "against", "all", "am", "an",
     "and", "any", "are", "as", "at", "be", "because", "been", "before",
@@ -325,11 +350,14 @@ def is_valid(url):
             kd = unquote_plus(raw_key.replace("+", "%20")).lower()
             if "filter" in kd:
                 return False
-            # Low-text media UIs; DokuWiki revision diffs (do=diff, difftype=…).
-            if kd == "do" and any(
-                (v or "").lower() in ("media", "diff") for v in values
-            ):
-                return False
+            if kd == "do":
+                for v in values:
+                    vl = (v or "").lower()
+                    if host == "wiki.ics.uci.edu":
+                        if vl in _WIKI_BAD_DO:
+                            return False
+                    elif vl in ("media", "diff"):
+                        return False
             if kd == "difftype":
                 return False
             if kd == "attachment_id" and any(v for v in values):
@@ -340,6 +368,11 @@ def is_valid(url):
                 return False
             # DokuWiki sidebar/index browser (?idx=namespace:...) — same page, URL explosion.
             if host == "wiki.ics.uci.edu" and kd == "idx":
+                return False
+            # Old revisions / diff inputs (?rev=…, ?rev2[0]=…).
+            if host == "wiki.ics.uci.edu" and (
+                kd == "rev" or kd.startswith("rev2") or kd.startswith("rev1")
+            ):
                 return False
 
         trap_tokens = (
