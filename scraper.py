@@ -29,10 +29,6 @@ VISUAL_DEAF_PAGE_HTML_MAX = 1500
 MAX_LINK_TO_WORD_RATIO = 2.5
 MAX_LINKS_WHEN_NO_WORDS = 35
 
-SIMHASH_BITS = 64
-SIMHASH_MAX_HAMMING_NEAR_DUP = 4
-MAX_SIMILARITY_INDEX_ENTRIES = 4000
-
 _ICAL_PARAM = re.compile(r"[?&]ical(?:=|%3d|%3D)", re.IGNORECASE)
 _TRIBE_HINT = re.compile(r"tribe[-_%]", re.IGNORECASE)
 
@@ -178,7 +174,6 @@ def _load_stats():
             "longest_page": {"url": "", "word_count": 0},
             "word_freq": {},
             "subdomains": {},
-            "similarity_seen": [],
         }
     try:
         with STATS_FILE.open("r", encoding="utf-8") as f:
@@ -187,7 +182,6 @@ def _load_stats():
         data.setdefault("longest_page", {"url": "", "word_count": 0})
         data.setdefault("word_freq", {})
         data.setdefault("subdomains", {})
-        data.setdefault("similarity_seen", [])
         return data
     except (json.JSONDecodeError, OSError):
         return {
@@ -195,7 +189,6 @@ def _load_stats():
             "longest_page": {"url": "", "word_count": 0},
             "word_freq": {},
             "subdomains": {},
-            "similarity_seen": [],
         }
 
 
@@ -239,87 +232,6 @@ def _link_dense_trap(link_count, word_count_all):
     if word_count_all < 1:
         return link_count > MAX_LINKS_WHEN_NO_WORDS
     return (link_count / word_count_all) > MAX_LINK_TO_WORD_RATIO
-
-
-def _fnv1a_64(data: bytes) -> int:
-    h = 14695981039346656037
-    prime = 1099511628211
-    for b in data:
-        h ^= b
-        h = (h * prime) & 0xFFFFFFFFFFFFFFFF
-    return h
-
-
-def _word_feature_hash(word: str) -> int:
-    return _fnv1a_64(word.encode("utf-8", errors="ignore"))
-
-
-def _simhash_from_word_frequencies(freq, bits: int = SIMHASH_BITS) -> int:
-    vec = [0] * bits
-    for word, weight in freq.items():
-        if not word or weight <= 0:
-            continue
-        h = _word_feature_hash(word)
-        for i in range(bits):
-            if (h >> i) & 1:
-                vec[i] += weight
-            else:
-                vec[i] -= weight
-    out = 0
-    for i in range(bits):
-        if vec[i] > 0:
-            out |= 1 << i
-    return out
-
-
-def _hamming_64(a: int, b: int) -> int:
-    x = (a ^ b) & 0xFFFFFFFFFFFFFFFF
-    n = 0
-    while x:
-        n += x & 1
-        x >>= 1
-    return n
-
-
-def _exact_multiset_signature_hex(freq) -> str:
-    parts = [f"{w}:{freq[w]}" for w in sorted(freq)]
-    blob = "|".join(parts).encode("utf-8", errors="ignore")
-    return format(_fnv1a_64(blob), "016x")
-
-
-def _similar_to_prior_page(freq) -> bool:
-    exact_hex = _exact_multiset_signature_hex(freq)
-    sim = _simhash_from_word_frequencies(freq)
-    stats = _load_stats()
-    seen = stats.get("similarity_seen") or []
-    for row in seen:
-        if row.get("exact_hex") == exact_hex:
-            return True
-        prev = row.get("simhash_hex")
-        if not prev:
-            continue
-        try:
-            prev_sim = int(prev, 16)
-        except (TypeError, ValueError):
-            continue
-        if _hamming_64(sim, prev_sim) <= SIMHASH_MAX_HAMMING_NEAR_DUP:
-            return True
-    return False
-
-
-def _append_similarity_record(page_url: str, freq) -> None:
-    stats = _load_stats()
-    seen = stats.setdefault("similarity_seen", [])
-    seen.append(
-        {
-            "url": page_url,
-            "exact_hex": _exact_multiset_signature_hex(freq),
-            "simhash_hex": format(_simhash_from_word_frequencies(freq), "016x"),
-        }
-    )
-    if len(seen) > MAX_SIMILARITY_INDEX_ENTRIES:
-        stats["similarity_seen"] = seen[-MAX_SIMILARITY_INDEX_ENTRIES:]
-    _save_stats(stats)
 
 
 def _record_page_stats(page_url, words, word_count_all):
@@ -401,12 +313,6 @@ def extract_next_links(url, resp):
     link_count = len(soup.find_all("a", href=True))
     if _link_dense_trap(link_count, word_count_all):
         return []
-
-    word_freq = Counter(words)
-    if _similar_to_prior_page(word_freq):
-        return []
-
-    _append_similarity_record(page_url, word_freq)
 
     next_links = []
     base = page_url or url
