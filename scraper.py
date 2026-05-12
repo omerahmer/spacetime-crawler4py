@@ -20,7 +20,7 @@ ALLOWED_DOMAINS = (
     ".stat.uci.edu",
 )
 
-HOSTS_BLOCKED = frozenset(("ngs.ics.uci.edu", "grape.ics.uci.edu"))
+HOSTS_BLOCKED = ("ngs.ics.uci.edu", "grape.ics.uci.edu")
 
 MAX_HTML_RESPONSE_BYTES = 5 * 1024 * 1024
 MIN_WORDS_TO_FOLLOW_LINKS = 15
@@ -29,11 +29,6 @@ VISUAL_DEAF_PAGE_HTML_MAX = 1500
 MAX_LINK_TO_WORD_RATIO = 2.5
 MAX_LINKS_WHEN_NO_WORDS = 35
 
-# ---------------------------------------------------------------------------
-# Extra credit: exact + near-duplicate page similarity (Charikar Simhash,
-# 2002). Implemented from scratch (no hashlib / no similarity packages).
-# Words are features; weights are term frequencies in the visible text.
-# ---------------------------------------------------------------------------
 SIMHASH_BITS = 64
 SIMHASH_MAX_HAMMING_NEAR_DUP = 4
 MAX_SIMILARITY_INDEX_ENTRIES = 4000
@@ -230,7 +225,6 @@ def _extract_words(soup):
 
 
 def _is_dead_like_page(words, html_len):
-    """HTTP 200 but no usable textual body — drop links only; page still counted as visited."""
     if html_len <= 32:
         return True
     if not words:
@@ -242,17 +236,12 @@ def _is_dead_like_page(words, html_len):
 
 
 def _link_dense_trap(link_count, word_count_all):
-    """
-    High link count relative to article text — link farms, giant nav blocks, trap listings.
-    Uses full visible word count (same tokenization as longest-page metric).
-    """
     if word_count_all < 1:
         return link_count > MAX_LINKS_WHEN_NO_WORDS
     return (link_count / word_count_all) > MAX_LINK_TO_WORD_RATIO
 
 
 def _fnv1a_64(data: bytes) -> int:
-    """FNV-1a 64-bit — deterministic word hashing for Simhash (no hashlib)."""
     h = 14695981039346656037
     prime = 1099511628211
     for b in data:
@@ -266,10 +255,6 @@ def _word_feature_hash(word: str) -> int:
 
 
 def _simhash_from_word_frequencies(freq, bits: int = SIMHASH_BITS) -> int:
-    """
-    Charikar Simhash: for each (word, weight), fold a b-bit hash into a vector V
-    (+weight where hash bit is 1, -weight where 0); fingerprint bit i is 1 iff V[i] > 0.
-    """
     vec = [0] * bits
     for word, weight in freq.items():
         if not word or weight <= 0:
@@ -297,18 +282,12 @@ def _hamming_64(a: int, b: int) -> int:
 
 
 def _exact_multiset_signature_hex(freq) -> str:
-    """Exact similarity on multiset of (word -> count), order-independent."""
     parts = [f"{w}:{freq[w]}" for w in sorted(freq)]
     blob = "|".join(parts).encode("utf-8", errors="ignore")
     return format(_fnv1a_64(blob), "016x")
 
 
 def _similar_to_prior_page(freq) -> bool:
-    """
-    True if this page is an exact duplicate (same weighted multiset signature)
-    or a near-duplicate (Simhash Hamming distance within threshold) of a
-    previously seen page in the rolling index.
-    """
     exact_hex = _exact_multiset_signature_hex(freq)
     sim = _simhash_from_word_frequencies(freq)
     stats = _load_stats()
@@ -352,7 +331,6 @@ def _record_page_stats(page_url, words, word_count_all):
     unique_pages.add(page_url)
     stats["unique_pages"] = sorted(unique_pages)
 
-    # Longest page: assignment asks for all words (HTML stripped); top-50 uses `words` (no stopwords).
     if word_count_all > stats["longest_page"].get("word_count", 0):
         stats["longest_page"] = {"url": page_url, "word_count": word_count_all}
 
@@ -493,7 +471,6 @@ def is_valid(url):
             kd = unquote_plus(raw_key.replace("+", "%20")).lower()
             if "filter" in kd:
                 return False
-            # Low-text media UIs; DokuWiki revision diffs (do=diff, difftype=…).
             blocked_do_values = {
                 "media",
                 "diff",
