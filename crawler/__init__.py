@@ -1,6 +1,8 @@
 from utils import get_logger
 from crawler.frontier import Frontier
+from crawler.politeness import PerHostPoliteness
 from crawler.worker import Worker
+
 
 class Crawler(object):
     def __init__(self, config, restart, frontier_factory=Frontier, worker_factory=Worker):
@@ -9,10 +11,13 @@ class Crawler(object):
         self.frontier = frontier_factory(config, restart)
         self.workers = list()
         self.worker_factory = worker_factory
+        self._politeness = PerHostPoliteness(self.config.time_delay)
 
     def start_async(self):
         self.workers = [
-            self.worker_factory(worker_id, self.config, self.frontier)
+            self.worker_factory(
+                worker_id, self.config, self.frontier, self._politeness
+            )
             for worker_id in range(self.config.threads_count)]
         for worker in self.workers:
             worker.start()
