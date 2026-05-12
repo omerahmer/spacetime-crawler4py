@@ -1,4 +1,3 @@
-import hashlib
 import json
 import re
 from collections import Counter
@@ -21,72 +20,145 @@ ALLOWED_DOMAINS = (
     ".stat.uci.edu",
 )
 
-HOSTS_BLOCKED = frozenset(
-    (
-        "wics.ics.uci.edu",
-        "ngs.ics.uci.edu",
-    )
-)
+HOSTS_BLOCKED = frozenset(("ngs.ics.uci.edu", "grape.ics.uci.edu"))
 
 MAX_HTML_RESPONSE_BYTES = 5 * 1024 * 1024
-# Pages below this (non-stopword tokens after stripping HTML) do not expand the frontier.
 MIN_WORDS_TO_FOLLOW_LINKS = 15
 VISUAL_DEAF_PAGE_HTML_MAX = 1500
 
-# Fingerprints: same boilerplate text across many URLs → stop adding outlinks for new URLs.
-DUPLICATE_BODY_MIN_CHARS = 180
-MAX_PAGES_PER_CONTENT_FINGERPRINT = 28
-_FINGERPRINT_TOKEN_CAP = 4000
-
-# Navigation / directory shells: too many links vs visible words → do not expand frontier.
 MAX_LINK_TO_WORD_RATIO = 2.5
 MAX_LINKS_WHEN_NO_WORDS = 35
 
-# Query token ical=… (encoded = ok). Avoids matching "medical" in paths.
 _ICAL_PARAM = re.compile(r"[?&]ical(?:=|%3d|%3D)", re.IGNORECASE)
 _TRIBE_HINT = re.compile(r"tribe[-_%]", re.IGNORECASE)
 
-# wiki.ics.uci.edu — DokuWiki non-article views (edit, old revisions, exports, indexes).
-_WIKI_BAD_DO = frozenset(
-    (
-        "",
-        "edit",
-        "export_pdf",
-        "export_odt",
-        "export_xhtml",
-        "export_raw",
-        "index",
-        "recent",
-        "backlink",
-        "revisions",
-        "media",
-        "diff",
-        "subscribe",
-        "admin",
-        "profile",
-        "register",
-        "recyclebin",
-        "login",
-        "logout",
-    )
-)
-
 STOP_WORDS = {
-    "a", "about", "above", "after", "again", "against", "all", "am", "an",
-    "and", "any", "are", "as", "at", "be", "because", "been", "before",
-    "being", "below", "between", "both", "but", "by", "can", "did", "do",
-    "does", "doing", "down", "during", "each", "few", "for", "from",
-    "further", "had", "has", "have", "having", "he", "her", "here", "hers",
-    "herself", "him", "himself", "his", "how", "i", "if", "in", "into",
-    "is", "it", "its", "itself", "just", "me", "more", "most", "my",
-    "myself", "no", "nor", "not", "now", "of", "off", "on", "once", "only",
-    "or", "other", "our", "ours", "ourselves", "out", "over", "own", "s",
-    "same", "she", "should", "so", "some", "such", "t", "than", "that",
-    "the", "their", "theirs", "them", "themselves", "then", "there",
-    "these", "they", "this", "those", "through", "to", "too", "under",
-    "until", "up", "very", "was", "we", "were", "what", "when", "where",
-    "which", "while", "who", "whom", "why", "will", "with", "you", "your",
-    "yours", "yourself", "yourselves",
+    "a",
+    "about",
+    "above",
+    "after",
+    "again",
+    "against",
+    "all",
+    "am",
+    "an",
+    "and",
+    "any",
+    "are",
+    "as",
+    "at",
+    "be",
+    "because",
+    "been",
+    "before",
+    "being",
+    "below",
+    "between",
+    "both",
+    "but",
+    "by",
+    "can",
+    "did",
+    "do",
+    "does",
+    "doing",
+    "down",
+    "during",
+    "each",
+    "few",
+    "for",
+    "from",
+    "further",
+    "had",
+    "has",
+    "have",
+    "having",
+    "he",
+    "her",
+    "here",
+    "hers",
+    "herself",
+    "him",
+    "himself",
+    "his",
+    "how",
+    "i",
+    "if",
+    "in",
+    "into",
+    "is",
+    "it",
+    "its",
+    "itself",
+    "just",
+    "me",
+    "more",
+    "most",
+    "my",
+    "myself",
+    "no",
+    "nor",
+    "not",
+    "now",
+    "of",
+    "off",
+    "on",
+    "once",
+    "only",
+    "or",
+    "other",
+    "our",
+    "ours",
+    "ourselves",
+    "out",
+    "over",
+    "own",
+    "s",
+    "same",
+    "she",
+    "should",
+    "so",
+    "some",
+    "such",
+    "t",
+    "than",
+    "that",
+    "the",
+    "their",
+    "theirs",
+    "them",
+    "themselves",
+    "then",
+    "there",
+    "these",
+    "they",
+    "this",
+    "those",
+    "through",
+    "to",
+    "too",
+    "under",
+    "until",
+    "up",
+    "very",
+    "was",
+    "we",
+    "were",
+    "what",
+    "when",
+    "where",
+    "which",
+    "while",
+    "who",
+    "whom",
+    "why",
+    "will",
+    "with",
+    "you",
+    "your",
+    "yours",
+    "yourself",
+    "yourselves",
 }
 
 
@@ -102,7 +174,6 @@ def _load_stats():
             "longest_page": {"url": "", "word_count": 0},
             "word_freq": {},
             "subdomains": {},
-            "fingerprint_counts": {},
         }
     try:
         with STATS_FILE.open("r", encoding="utf-8") as f:
@@ -111,7 +182,6 @@ def _load_stats():
         data.setdefault("longest_page", {"url": "", "word_count": 0})
         data.setdefault("word_freq", {})
         data.setdefault("subdomains", {})
-        data.setdefault("fingerprint_counts", {})
         return data
     except (json.JSONDecodeError, OSError):
         return {
@@ -119,7 +189,6 @@ def _load_stats():
             "longest_page": {"url": "", "word_count": 0},
             "word_freq": {},
             "subdomains": {},
-            "fingerprint_counts": {},
         }
 
 
@@ -160,14 +229,6 @@ def _is_dead_like_page(words, html_len):
     return False
 
 
-def _content_fingerprint(words):
-    """Hash of stopword-stripped tokens — identical boilerplate pages share the fingerprint."""
-    if not words:
-        return ""
-    joined = "|".join(words[:_FINGERPRINT_TOKEN_CAP])
-    return hashlib.sha256(joined.encode("utf-8", errors="ignore")).hexdigest()
-
-
 def _link_dense_trap(link_count, word_count_all):
     """
     High link count relative to article text — link farms, giant nav blocks, trap listings.
@@ -176,28 +237,6 @@ def _link_dense_trap(link_count, word_count_all):
     if word_count_all < 1:
         return link_count > MAX_LINKS_WHEN_NO_WORDS
     return (link_count / word_count_all) > MAX_LINK_TO_WORD_RATIO
-
-
-def _duplicate_low_info_exhausted(words):
-    """
-    After MAX_PAGES_PER_CONTENT_FINGERPRINT crawled pages share the same body fingerprint,
-    do not enqueue further links (similar shells / no new information).
-    """
-    body = " ".join(words)
-    if len(body.strip()) < DUPLICATE_BODY_MIN_CHARS:
-        return False
-    fp = _content_fingerprint(words)
-    if not fp:
-        return False
-    stats = _load_stats()
-    counts = stats.setdefault("fingerprint_counts", {})
-    prev = counts.get(fp, 0)
-    if prev >= MAX_PAGES_PER_CONTENT_FINGERPRINT:
-        return True
-    counts[fp] = prev + 1
-    stats["fingerprint_counts"] = counts
-    _save_stats(stats)
-    return False
 
 
 def _record_page_stats(page_url, words, word_count_all):
@@ -245,8 +284,7 @@ def extract_next_links(url, resp):
     raw_len = len(raw)
     if raw_len > MAX_HTML_RESPONSE_BYTES:
         return []
-    declared = (
-        resp.raw_response.headers.get("Content-Length") or "").strip()
+    declared = (resp.raw_response.headers.get("Content-Length") or "").strip()
     try:
         if declared.isdigit() and int(declared) > MAX_HTML_RESPONSE_BYTES:
             return []
@@ -276,9 +314,6 @@ def extract_next_links(url, resp):
         return []
 
     if len(words) < MIN_WORDS_TO_FOLLOW_LINKS:
-        return []
-
-    if _duplicate_low_info_exhausted(words):
         return []
 
     link_count = len(soup.find_all("a", href=True))
@@ -319,11 +354,9 @@ def is_valid(url):
 
         path_segments = [seg for seg in path_l.split("/") if seg]
 
-        # Glob */events/* — any URL whose path contains a segment named exactly "events".
         if "events" in path_segments:
             return False
 
-        # Singular /event/<slug>/… calendar churn.
         if path_l.startswith("/event/"):
             return False
 
@@ -350,34 +383,38 @@ def is_valid(url):
             kd = unquote_plus(raw_key.replace("+", "%20")).lower()
             if "filter" in kd:
                 return False
-            if kd == "do":
-                for v in values:
-                    vl = (v or "").lower()
-                    if host == "wiki.ics.uci.edu":
-                        if vl in _WIKI_BAD_DO:
-                            return False
-                    elif vl in ("media", "diff"):
-                        return False
+            # Low-text media UIs; DokuWiki revision diffs (do=diff, difftype=…).
+            blocked_do_values = {
+                "media",
+                "diff",
+                "index",
+                "recent",
+                "backlink",
+                "revisions",
+                "export_pdf",
+            }
+            if kd == "do" and any(
+                (v or "").lower() in blocked_do_values for v in values
+            ):
+                return False
             if kd == "difftype":
                 return False
             if kd == "attachment_id" and any(v for v in values):
                 return False
-            if host == "wiki.ics.uci.edu" and kd == "image" and any(
-                v for v in values
-            ):
+            if host == "wiki.ics.uci.edu" and kd == "image" and any(v for v in values):
                 return False
-            # DokuWiki sidebar/index browser (?idx=namespace:...) — same page, URL explosion.
             if host == "wiki.ics.uci.edu" and kd == "idx":
-                return False
-            # Old revisions / diff inputs (?rev=…, ?rev2[0]=…).
-            if host == "wiki.ics.uci.edu" and (
-                kd == "rev" or kd.startswith("rev2") or kd.startswith("rev1")
-            ):
                 return False
 
         trap_tokens = (
-            "share=", "replytocom=", "sort=", "sessionid=",
-            "filter=", "login", "signup", "wp-json",
+            "share=",
+            "replytocom=",
+            "sort=",
+            "sessionid=",
+            "filter=",
+            "login",
+            "signup",
+            "wp-json",
         )
         if any(tok in lowered for tok in trap_tokens):
             return False
